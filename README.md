@@ -50,7 +50,7 @@ Code, config and dumps are kept apart:
 |---|---|---|
 | **The script** | this repo, e.g. `~/code/utils/easy-db-dump/bin/edd` | cloned once; `git pull` to update |
 | **The command** | `~/.local/bin/edd` | symlink to the script, created by `bin/install` |
-| **Config** | `~/.config/edd/` | one folder per project, one file per environment |
+| **Config** | `~/edd/` | one folder per project, one file per environment |
 | **Dumps** | `~/db-dumps/<project>/YYYY/MM/` | root configurable; a project can use its own folder |
 
 ```
@@ -60,7 +60,7 @@ Code, config and dumps are kept apart:
 ├── templates/                          <- copied by `edd init`
 └── systemd/
 
-~/.config/edd/                          <- all your config, outside any repo
+~/edd/                                  <- all your config, outside any repo
 ├── settings.env                        <- global: BACKUP_DIR, RETENTION_DAYS, local Postgres defaults
 └── projects/
     ├── myapp/
@@ -81,6 +81,9 @@ Code, config and dumps are kept apart:
 ~/code/shop/db/                         <- shop's PROJECT_BACKUP_DIR
 └── 2026/11/prod_20261123_0952_backup.sql
 ```
+
+To keep the config somewhere else, export `EDD_CONFIG_DIR` in your shell profile
+(e.g. `export EDD_CONFIG_DIR="$HOME/Dropbox/edd"`) before running `bin/install`.
 
 **The repo folder is the installation**: don't move or delete it (if you move it, run
 `bin/install` again from the new location).
@@ -121,10 +124,10 @@ git clone git@github.com:poacosta/easy-db-dump.git ~/code/utils/easy-db-dump
 ~/code/utils/easy-db-dump/bin/install
 ```
 
-This creates the `edd` command, the `~/.config/edd/` folder with `settings.env`, a single
+This creates the `edd` command, the `~/edd/` folder with `settings.env`, a single
 **"DB sync"** launcher in your applications menu, and the systemd units for the optional daily sync.
 
-**3. Review the global settings** in `~/.config/edd/settings.env`: where dumps go (`BACKUP_DIR`,
+**3. Review the global settings** in `~/edd/settings.env`: where dumps go (`BACKUP_DIR`,
 default `~/db-dumps`) and your usual local Postgres credentials, so you don't repeat them per project.
 
 ### Once per target (project + environment)
@@ -135,7 +138,7 @@ default `~/db-dumps`) and your usual local Postgres credentials, so you don't re
 edd init myapp prod
 ```
 
-This creates `~/.config/edd/projects/myapp/prod.env` (and `project.env` the first time for that
+This creates `~/edd/projects/myapp/prod.env` (and `project.env` the first time for that
 project) and opens it in your editor. Fill in:
 
 ```bash
@@ -171,7 +174,7 @@ edd check myapp prod
 
 ```
 [edd] Target:      myapp:prod
-[edd] Config file: /home/you/.config/edd/projects/myapp/prod.env
+[edd] Config file: /home/you/edd/projects/myapp/prod.env
 [edd] Dump folder: /home/you/db-dumps/myapp
 [edd] Remote OK: postgres@myapp.xxxxxxxx.us-east-1.rds.amazonaws.com:5432/myapp
 [edd] Local OK:  postgres@localhost:5432 (target database: myapp_prod)
