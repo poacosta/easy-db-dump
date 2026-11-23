@@ -15,14 +15,62 @@ Assumption: the remote databases are publicly accessible, so no VPN, bastion or 
 
 ---
 
+## Where things live
+
+**The script lives inside this repo.** You don't copy `bin/edd` anywhere: clone the repo once, in
+any folder you like, and `bin/install` links it into your `PATH`. The repo folder is the
+installation, so **don't move or delete it afterwards** (if you do, run `bin/install` again from the
+new location).
+
+**Dumps are saved inside the repo too, in `db/`** (git-ignored), one folder per year and month:
+
+```
+~/code/utils/easy-db-dump/          <- the repo, wherever you cloned it
+├── bin/
+│   ├── edd                         <- the script (linked as ~/.local/bin/edd)
+│   └── install
+├── config/
+│   ├── settings.env                <- global settings (BACKUP_DIR, RETENTION_DAYS…)
+│   ├── prod.env                    <- one file per environment (git-ignored)
+│   └── staging.env
+└── db/                             <- dumps (git-ignored)
+    └── 2026/
+        └── 11/
+            ├── prod_20261122_0830_backup.sql
+            └── prod_20261123_0952_backup.sql
+```
+
+To store dumps somewhere else (another disk, a shared folder…), set an **absolute path** in
+`config/settings.env`. The `YYYY/MM/` subfolders are created inside it:
+
+```bash
+BACKUP_DIR=/data/db-dumps     # -> /data/db-dumps/2026/11/prod_20261123_0952_backup.sql
+```
+
+`edd check <env>` prints the config file and backup folder in use, and `edd list` shows every dump
+with its full path.
+
+Files created outside the repo, all by `bin/install`:
+
+| Path | What |
+|---|---|
+| `~/.local/bin/edd` | symlink to `bin/edd` |
+| `~/.local/share/applications/edd-sync-<env>.desktop` | the one-click launcher |
+| `~/.config/systemd/user/edd-sync@.service` / `.timer` | the daily timer |
+| `~/.pgpass` | your remote password, if you choose option a) in step 4 (you create it) |
+
+---
+
 ## One-time setup
 
 You only do this once per machine (steps 1–2) and once per environment (steps 3–6).
 
 ### 1. Clone the repo
 
+Pick a permanent folder: this is where the script runs from and, by default, where the dumps are saved.
+
 ```bash
-git clone <repo> ~/code/utils/easy-db-dump
+git clone git@github.com:poacosta/easy-db-dump.git ~/code/utils/easy-db-dump
 cd ~/code/utils/easy-db-dump
 ```
 
