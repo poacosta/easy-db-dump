@@ -1,58 +1,124 @@
 #!/usr/bin/env bash
 # edd — easy-db-dump
-# Dump a remote Postgres database (AWS/RDS) and restore it into a local database.
+# Dump remote Postgres databases (AWS/RDS) and restore them into local databases.
+# One installation handles any number of projects, each with any number of environments.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-CONFIG_DIR="${EDD_CONFIG_DIR:-$ROOT/config}"
+CONFIG_DIR="${EDD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/edd}"
+PROJECTS_DIR="$CONFIG_DIR/projects"
+TEMPLATES_DIR="$ROOT/templates"
+NAME_RE='^[a-zA-Z0-9_-]+$'
 
 # ---------- helpers ----------
-log()  { printf '\033[1;34m[edd]\033[0m %s\n' "$*" >&2; }
-ok()   { printf '\033[1;32m[edd]\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31m[edd]\033[0m %s\n' "$*" >&2; exit 1; }
+log()    { printf '\033[1;34m[edd]\033[0m %s\n' "$*" >&2; }
+ok()     { printf '\033[1;32m[edd]\033[0m %s\n' "$*" >&2; }
+err()    { printf '\033[1;31m[edd]\033[0m %s\n' "$*" >&2; }
+die()    { err "$*"; exit 1; }
+notify() { command -v notify-send >/dev/null && notify-send "$@" 2>/dev/null || true; }
 
 usage() {
   cat <<EOF
-Usage: edd <command> [args]
+Usage: edd <command> [target] [args]
 
-  dump    <env>          Dump the remote database -> db/YYYY/MM/<env>_YYYYMMDD_HHMM_backup.sql
-  restore <env> [file]   Restore into the local database (defaults to the latest dump of <env>)
-  sync    <env>          dump + restore in one step (the daily routine)
-  list    [env]          List existing dumps
-  clean                  Delete dumps older than RETENTION_DAYS
-  check   <env>          Verify the config: remote and local connections
-  envs                   List configured environments
+A target is a project and an environment: "myapp prod" or "myapp:prod".
+Commands that take a target show a picker when it is omitted.
 
-Config: $CONFIG_DIR/settings.env and $CONFIG_DIR/<env>.env
+  init    <target>          Create the config file for a target and open it in your editor
+  sync    [target]          dump + restore in one step (what the launcher runs)
+  check   [target]          Verify the remote and local connections
+  dump    [target]          Dump the remote database
+  restore [target] [file]   Recreate the local database and restore (defaults to the latest dump)
+  targets                   List configured targets
+  list    [project]         List existing dumps
+  clean                     Delete dumps older than RETENTION_DAYS
+  timer   list | on <target> | off <target>
+                            Manage the daily automatic sync of a target
+
+Config: $CONFIG_DIR
 EOF
 }
 
-load_settings() {
-  BACKUP_DIR="$ROOT/db"
+# Defaults, then each config layer in order; later layers override earlier ones:
+#   settings.env  ->  projects/<project>/project.env  ->  projects/<project>/<env>.env
+load_layers() {
+  BACKUP_DIR="$HOME/db-dumps"
+  PROJECT_BACKUP_DIR=""
   RETENTION_DAYS=30
   PG_DOCKER_IMAGE=""
   PG_DUMP_EXTRA_ARGS="--no-owner --no-privileges"
   RESTORE_STRICT=0
-  # shellcheck disable=SC1091
-  [[ -f "$CONFIG_DIR/settings.env" ]] && source "$CONFIG_DIR/settings.env"
-  [[ "$BACKUP_DIR" = /* ]] || BACKUP_DIR="$ROOT/$BACKUP_DIR"
-}
-
-load_env() {
-  local env="${1:-}"
-  [[ -n "$env" ]] || die "Missing environment (e.g. edd sync prod)"
-  [[ "$env" =~ ^[a-zA-Z0-9_-]+$ ]] || die "Invalid environment name: $env"
-  local file="$CONFIG_DIR/$env.env"
-  [[ -f "$file" ]] || die "$file not found (copy config/example.env)"
-
   REMOTE_HOST="" REMOTE_PORT=5432 REMOTE_USER=postgres REMOTE_DB=""
   REMOTE_PASSWORD="" REMOTE_PASSWORD_CMD=""
   LOCAL_HOST=localhost LOCAL_PORT=5432 LOCAL_USER=postgres LOCAL_DB=""
   LOCAL_PASSWORD="" ALLOW_NON_LOCAL_RESTORE=0
-  # shellcheck disable=SC1090
-  source "$file"
-  ENV_NAME="$env"
+
+  local layers=("$CONFIG_DIR/settings.env")
+  [[ -n "${PROJECT:-}" ]] && layers+=("$PROJECTS_DIR/$PROJECT/project.env")
+  [[ -n "${PROJECT:-}" && -n "${ENV_NAME:-}" ]] && layers+=("$PROJECTS_DIR/$PROJECT/$ENV_NAME.env")
+  local f
+  for f in "${layers[@]}"; do
+    # shellcheck disable=SC1090
+    if [[ -f "$f" ]]; then source "$f"; fi
+  done
+
   LOCAL_DB="${LOCAL_DB:-$REMOTE_DB}"
+  # Dumps go to <BACKUP_DIR>/<project>/YYYY/MM/, unless the project sets its own folder.
+  DUMP_DIR="${PROJECT_BACKUP_DIR:-$BACKUP_DIR/${PROJECT:-}}"
+}
+
+list_projects() {
+  find "$PROJECTS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null | sort
+}
+
+list_targets() {
+  local project
+  for project in $(list_projects); do
+    find "$PROJECTS_DIR/$project" -maxdepth 1 -name '*.env' ! -name project.env -printf '%f\n' \
+      | sed "s/\.env$//; s/^/$project:/"
+  done | sort
+}
+
+pick_target() {
+  [[ -t 0 ]] || die "Missing target (e.g. edd sync myapp prod)"
+  local targets choice=""
+  mapfile -t targets < <(list_targets)
+  (( ${#targets[@]} )) || die "No targets configured yet. Run: edd init <project> <env>"
+  if (( ${#targets[@]} == 1 )); then
+    choice="${targets[0]}"
+  elif command -v fzf >/dev/null; then
+    choice="$(printf '%s\n' "${targets[@]}" | fzf --prompt='target> ' --height=40% --reverse)" || true
+  else
+    PS3="Select a target: "
+    select choice in "${targets[@]}"; do [[ -n "$choice" ]] && break; done
+  fi
+  [[ -n "$choice" ]] || die "No target selected"
+  PROJECT="${choice%%:*}"; ENV_NAME="${choice#*:}"
+}
+
+# Parses "project env" or "project:env" from the arguments; leftovers go to REST.
+# With no arguments: shows the picker if allowed ($1 = "pick"), otherwise fails.
+resolve_target() {
+  local mode="$1"; shift
+  PROJECT="" ENV_NAME="" REST=()
+  if [[ "${1:-}" == *:* ]]; then
+    PROJECT="${1%%:*}"; ENV_NAME="${1#*:}"; REST=("${@:2}")
+  elif [[ -n "${1:-}" ]]; then
+    PROJECT="$1"; ENV_NAME="${2:-}"; REST=("${@:3}")
+  elif [[ "$mode" == pick ]]; then
+    pick_target
+  fi
+  [[ -n "$PROJECT" && -n "$ENV_NAME" ]] || die "Missing target: <project> <env> (e.g. myapp prod)"
+  [[ "$PROJECT" =~ $NAME_RE && "$ENV_NAME" =~ $NAME_RE ]] \
+    || die "Invalid target '$PROJECT:$ENV_NAME' (letters, digits, '-' and '_' only)"
+}
+
+target_file() { printf '%s' "$PROJECTS_DIR/$PROJECT/$ENV_NAME.env"; }
+
+load_target() {
+  resolve_target "$@"
+  [[ -f "$(target_file)" ]] || die "$(target_file) not found. Run: edd init $PROJECT $ENV_NAME"
+  load_layers
 }
 
 # Run a Postgres binary, either locally or inside Docker (PG_DOCKER_IMAGE).
@@ -80,21 +146,40 @@ remote_password() {
 }
 
 latest_dump() {
-  find "$BACKUP_DIR" -type f -name "${1}_*_backup.sql" 2>/dev/null | sort | tail -n1
+  find "$DUMP_DIR" -type f -name "${ENV_NAME}_*_backup.sql" 2>/dev/null | sort | tail -n1
 }
 
 # ---------- commands ----------
-cmd_dump() {
-  load_env "$1"
-  [[ -n "$REMOTE_HOST" && -n "$REMOTE_DB" ]] || die "REMOTE_HOST and REMOTE_DB are required"
+cmd_init() {
+  resolve_target nopick "$@"
+  local file; file="$(target_file)"
+  mkdir -p "$PROJECTS_DIR/$PROJECT"
+  [[ -f "$CONFIG_DIR/settings.env" ]] || cp "$TEMPLATES_DIR/settings.env" "$CONFIG_DIR/settings.env"
+  [[ -f "$PROJECTS_DIR/$PROJECT/project.env" ]] \
+    || cp "$TEMPLATES_DIR/project.env" "$PROJECTS_DIR/$PROJECT/project.env"
+  if [[ -f "$file" ]]; then
+    log "$file already exists"
+  else
+    cp "$TEMPLATES_DIR/target.env" "$file"
+    chmod 600 "$file"
+    ok "Created $file"
+  fi
+  if [[ -t 0 && -t 1 ]]; then
+    "${VISUAL:-${EDITOR:-nano}}" "$file"
+    log "Next: edd check $PROJECT $ENV_NAME"
+  fi
+}
 
-  local ts year month dir out
-  ts="$(date +%Y%m%d_%H%M)"; year="$(date +%Y)"; month="$(date +%m)"
-  dir="$BACKUP_DIR/$year/$month"
-  out="$dir/${ENV_NAME}_${ts}_backup.sql"
+cmd_dump() {
+  load_target pick "$@"
+  [[ -n "$REMOTE_HOST" && -n "$REMOTE_DB" ]] || die "REMOTE_HOST and REMOTE_DB are required in $(target_file)"
+
+  local dir out
+  dir="$DUMP_DIR/$(date +%Y)/$(date +%m)"
+  out="$dir/${ENV_NAME}_$(date +%Y%m%d_%H%M)_backup.sql"
   mkdir -p "$dir"
 
-  log "Dumping $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB"
+  log "[$PROJECT:$ENV_NAME] Dumping $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB"
   local pw; pw="$(remote_password)"
   local start=$SECONDS
   # Write to a .partial file and only rename on success, so a truncated dump is never restored.
@@ -111,10 +196,10 @@ cmd_dump() {
 }
 
 cmd_restore() {
-  load_env "$1"
-  local file="${2:-}"
-  [[ -n "$file" ]] || file="$(latest_dump "$ENV_NAME")"
-  [[ -n "$file" && -f "$file" ]] || die "No dump to restore (run: edd dump $ENV_NAME)"
+  load_target pick "$@"
+  local file="${REST[0]:-}"
+  [[ -n "$file" ]] || file="$(latest_dump)"
+  [[ -n "$file" && -f "$file" ]] || die "No dump to restore (run: edd dump $PROJECT $ENV_NAME)"
   [[ -n "$LOCAL_DB" ]] || die "LOCAL_DB is empty"
 
   # Safety guard: the target database gets dropped, so only allow local hosts by default.
@@ -127,31 +212,42 @@ cmd_restore() {
   export PGPASSWORD="$LOCAL_PASSWORD"
   local conn=(-h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$LOCAL_USER" -w)
 
-  log "Recreating local database '$LOCAL_DB' on $LOCAL_HOST:$LOCAL_PORT"
+  log "[$PROJECT:$ENV_NAME] Recreating local database '$LOCAL_DB' on $LOCAL_HOST:$LOCAL_PORT"
   pg psql "${conn[@]}" -d postgres -q -v ON_ERROR_STOP=1 -c "SET client_min_messages = warning;" \
     -c "DROP DATABASE IF EXISTS \"$LOCAL_DB\" WITH (FORCE);" \
     -c "CREATE DATABASE \"$LOCAL_DB\";" \
     || die "Could not recreate the local database (is local Postgres running?)"
 
-  log "Restoring $(basename "$file")"
+  log "[$PROJECT:$ENV_NAME] Restoring $(basename "$file")"
   local strict=(); [[ "$RESTORE_STRICT" == 1 ]] && strict=(-v ON_ERROR_STOP=1)
   local start=$SECONDS
   pg psql "${conn[@]}" -d "$LOCAL_DB" -q "${strict[@]}" < "$file" >/dev/null
   ok "Restore finished in $((SECONDS - start))s -> $LOCAL_DB"
 }
 
+cmd_sync() {
+  resolve_target pick "$@"
+  SYNC_TARGET="$PROJECT:$ENV_NAME"
+  # Desktop notification on failure too, so a failed timer run does not go unnoticed.
+  trap 'rc=$?; if (( rc )); then notify -u critical "easy-db-dump" "$SYNC_TARGET sync FAILED"; fi' EXIT
+  cmd_dump "$PROJECT" "$ENV_NAME"
+  cmd_restore "$PROJECT" "$ENV_NAME" "$LAST_DUMP"
+  notify "easy-db-dump" "$SYNC_TARGET synced ✔"
+}
+
 cmd_check() {
-  load_env "$1"
+  load_target pick "$@"
   local failed=0
-  log "Config file: $CONFIG_DIR/$ENV_NAME.env"
-  log "Backup dir:  $BACKUP_DIR"
+  log "Target:      $PROJECT:$ENV_NAME"
+  log "Config file: $(target_file)"
+  log "Dump folder: $DUMP_DIR"
 
   local pw; pw="$(remote_password)"
   if PGPASSWORD="$pw" pg psql -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$REMOTE_USER" -d "$REMOTE_DB" -w \
-       -tAc "select current_setting('server_version')" >/dev/null 2>&1; then
+       -tAc "select 1" >/dev/null 2>&1; then
     ok "Remote OK: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB"
   else
-    printf '\033[1;31m[edd]\033[0m %s\n' "Remote FAILED: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB (host/port? password?)" >&2
+    err "Remote FAILED: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB (host/port? password?)"
     failed=1
   fi
 
@@ -159,47 +255,78 @@ cmd_check() {
        -tAc "select 1" >/dev/null 2>&1; then
     ok "Local OK:  $LOCAL_USER@$LOCAL_HOST:$LOCAL_PORT (target database: $LOCAL_DB)"
   else
-    printf '\033[1;31m[edd]\033[0m %s\n' "Local FAILED: $LOCAL_USER@$LOCAL_HOST:$LOCAL_PORT (is local Postgres running?)" >&2
+    err "Local FAILED: $LOCAL_USER@$LOCAL_HOST:$LOCAL_PORT (is local Postgres running?)"
     failed=1
   fi
 
-  [[ $failed == 0 ]] && ok "All good. 'edd sync $ENV_NAME' is ready." || exit 1
+  (( failed == 0 )) || exit 1
+  ok "All good. 'edd sync $PROJECT $ENV_NAME' is ready."
 }
 
-cmd_sync() {
-  cmd_dump "$1"
-  cmd_restore "$1" "$LAST_DUMP"
-  command -v notify-send >/dev/null && notify-send "easy-db-dump" "$1 synced ✔" || true
+cmd_targets() {
+  local targets; targets="$(list_targets)"
+  if [[ -n "$targets" ]]; then printf '%s\n' "$targets"; else log "No targets yet. Run: edd init <project> <env>"; fi
 }
 
 cmd_list() {
-  local pattern="${1:-*}"
-  find "$BACKUP_DIR" -type f -name "${pattern}_*_backup.sql" -printf '%TY-%Tm-%Td %TH:%TM  %10s  %p\n' 2>/dev/null \
-    | sort | awk '{ printf "%s %s  %8.1f MB  %s\n", $1, $2, $3/1048576, $4 }'
+  local projects=("${1:-}")
+  [[ -n "${1:-}" ]] || mapfile -t projects < <(list_projects)
+  local project
+  for project in "${projects[@]}"; do
+    [[ -n "$project" ]] || continue
+    local dir; dir="$(PROJECT="$project"; ENV_NAME=""; load_layers; printf '%s' "$DUMP_DIR")"
+    find "$dir" -type f -name '*_backup.sql' -printf "%TY-%Tm-%Td %TH:%TM  %s  $project  %p\n" 2>/dev/null || true
+  done | sort | awk '{ printf "%s %s  %8.1f MB  %-15s %s\n", $1, $2, $3/1048576, $4, $5 }'
 }
 
 cmd_clean() {
-  log "Deleting dumps older than $RETENTION_DAYS days in $BACKUP_DIR"
-  find "$BACKUP_DIR" -type f -name '*_backup.sql' -mtime +"$RETENTION_DAYS" -print -delete 2>/dev/null || true
-  find "$BACKUP_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+  local project
+  for project in $(list_projects); do
+    (
+      PROJECT="$project" ENV_NAME=""
+      load_layers
+      [[ -d "$DUMP_DIR" ]] || exit 0
+      log "[$project] Deleting dumps older than $RETENTION_DAYS days in $DUMP_DIR"
+      find "$DUMP_DIR" -type f -name '*_backup.sql' -mtime +"$RETENTION_DAYS" -print -delete
+      # Only remove empty YYYY/MM folders, never anything else.
+      find "$DUMP_DIR" -mindepth 1 -maxdepth 2 -depth -type d -empty -regextype posix-extended \
+        -regex '.*/[0-9]{4}(/[0-9]{2})?' -delete
+    )
+  done
 }
 
-cmd_envs() {
-  find "$CONFIG_DIR" -maxdepth 1 -name '*.env' ! -name settings.env ! -name example.env -printf '%f\n' \
-    | sed 's/\.env$//' | sort
+cmd_timer() {
+  local action="${1:-list}"; shift || true
+  case "$action" in
+    list)
+      systemctl --user list-timers --all 'edd-sync@*' ;;
+    on|off)
+      resolve_target nopick "$@"
+      [[ -f "$(target_file)" ]] || die "$(target_file) not found. Run: edd init $PROJECT $ENV_NAME"
+      local unit="edd-sync@$PROJECT:$ENV_NAME.timer"
+      if [[ "$action" == on ]]; then
+        systemctl --user enable --now "$unit"
+        ok "Daily sync enabled for $PROJECT:$ENV_NAME (logs: journalctl --user -u edd-sync@$PROJECT:$ENV_NAME)"
+      else
+        systemctl --user disable --now "$unit"
+        ok "Daily sync disabled for $PROJECT:$ENV_NAME"
+      fi ;;
+    *) die "Usage: edd timer list | on <target> | off <target>" ;;
+  esac
 }
 
 main() {
-  load_settings
   local cmd="${1:-}"; shift || true
   case "$cmd" in
+    init)    cmd_init "$@" ;;
+    sync)    cmd_sync "$@" ;;
+    check)   cmd_check "$@" ;;
     dump)    cmd_dump "$@" ;;
     restore) cmd_restore "$@" ;;
-    sync)    cmd_sync "$@" ;;
+    targets) cmd_targets ;;
     list)    cmd_list "$@" ;;
     clean)   cmd_clean ;;
-    check)   cmd_check "$@" ;;
-    envs)    cmd_envs ;;
+    timer)   cmd_timer "$@" ;;
     ""|-h|--help|help) usage ;;
     *) usage; exit 1 ;;
   esac

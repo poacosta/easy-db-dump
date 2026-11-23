@@ -4,5 +4,6 @@ After=network-online.target docker.service
 
 [Service]
 Type=oneshot
-ExecStart=%h/code/utils/easy-db-dump/bin/edd sync %i
-ExecStartPost=%h/code/utils/easy-db-dump/bin/edd clean
+# %i is the target as "project:env"
+ExecStart=%h/.local/bin/edd sync %i
+ExecStartPost=%h/.local/bin/edd clean

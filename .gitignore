@@ -1,4 +1,1 @@
-/db/
 *.partial
-config/*.env
-!config/example.env
