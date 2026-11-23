@@ -1,11 +1,11 @@
 # easy-db-dump (`edd`)
 
-Bring Postgres databases from AWS/RDS into your local Postgres with **one click** — for as many
-projects and environments as you work on, from a **single installation**. Works on **Linux and macOS**.
+A command-line tool that brings Postgres databases from AWS/RDS into your local Postgres with
+**one command** — for as many projects and environments as you work on, from a **single
+installation**. Works on **Linux and macOS**.
 
 You install it **once per machine** and configure each project/environment **once**. After that,
-every refresh is a click on the "DB sync" launcher (pick the target from a menu), or zero clicks
-with the daily timer.
+every refresh is `edd sync myapp prod`, or nothing at all with the daily timer.
 
 ```mermaid
 flowchart LR
@@ -52,13 +52,11 @@ Code, config and dumps are kept apart:
 | **The command** | `~/.local/bin/edd` | symlink to the script, created by `bin/install` |
 | **Config** | `~/.edd/` | one folder per project, one file per environment |
 | **Dumps** | `~/db-dumps/<project>/YYYY/MM/` | root configurable; a project can use its own folder |
-| **Launcher** | Linux: `~/.local/share/applications/edd-sync.desktop`<br/>macOS: `~/Applications/DB sync.app` | created by `bin/install` |
 | **Daily timer** | Linux: `~/.config/systemd/user/edd-sync@.{service,timer}`<br/>macOS: `~/Library/LaunchAgents/dev.easy-db-dump.sync.<project>.<env>.plist` | per target, created by `edd timer on` |
 
 ```
 ~/code/utils/easy-db-dump/              <- this repo (code only, no config, no dumps)
 ├── bin/edd                             <- the script
-├── bin/edd-launch                      <- what the "DB sync" launcher runs
 ├── bin/install
 ├── templates/                          <- copied by `edd init`
 └── systemd/
@@ -138,11 +136,8 @@ git clone git@github.com:poacosta/easy-db-dump.git ~/code/utils/easy-db-dump
 ```
 
 This creates the `edd` command (in `~/.local/bin`; the installer tells you if that folder is
-missing from your `PATH`), the `~/.edd/` folder with `settings.env`, and a single **"DB sync"** launcher:
-
-- **Linux**: an entry in the applications menu (plus the systemd units for the optional daily sync).
-- **macOS**: an app in `~/Applications/DB sync.app`. Open it from Spotlight (`⌘ Space` → "DB sync")
-  or drag it to the Dock. The first time, macOS asks to let it control Terminal: click **OK**.
+missing from your `PATH`) and the `~/.edd/` folder with `settings.env`. On Linux it also installs
+the systemd units for the optional daily sync.
 
 **3. Review the global settings** in `~/.edd/settings.env`: where dumps go (`BACKUP_DIR`,
 default `~/db-dumps`) and your usual local Postgres credentials, so you don't repeat them per project.
@@ -204,8 +199,7 @@ edd check myapp prod
 edd timer on myapp prod
 ```
 
-It runs Monday to Friday at 08:30, then deletes old dumps. You get a desktop notification on
-success and on failure.
+It runs Monday to Friday at 08:30, then deletes old dumps. Output goes to the logs below.
 
 | | Scheduler | If the machine was off or asleep at 08:30 | Logs |
 |---|---|---|---|
@@ -219,9 +213,13 @@ Repeat steps 4–7 for each new project or environment. Steps 1–3 are never re
 
 ---
 
-## Daily use: one click
+## Daily use: one command
 
-Open **"DB sync"** (applications menu on Linux, Spotlight or the Dock on macOS) and pick the target:
+```bash
+edd sync myapp prod      # or: edd sync myapp:prod
+```
+
+Or run `edd sync` with no target and pick it from the list:
 
 ```
 1) myapp:prod
@@ -231,21 +229,14 @@ Select a target: 1
 ```
 
 With a single configured target it starts right away; with [`fzf`](https://github.com/junegunn/fzf)
-installed you get a searchable list instead (handy with 20 projects). A desktop notification tells
-you when it's done.
-
-From a terminal:
-
-```bash
-edd sync myapp prod      # or: edd sync myapp:prod, or just: edd sync (picker)
-```
+installed you get a searchable list instead (handy with 20 projects).
 
 ## All commands
 
 | Command | What it does |
 |---|---|
 | `edd init <project> <env>` | create a target's config file and open it |
-| `edd sync [target]` | dump + restore (what the launcher runs) |
+| `edd sync [target]` | dump + restore (the daily routine) |
 | `edd check [target]` | verify remote and local connections |
 | `edd dump [target]` | dump only |
 | `edd restore [target] [file]` | recreate the local database and restore (defaults to the target's latest dump) |
@@ -295,8 +286,6 @@ Any setting can go in any layer (`settings.env`, `project.env`, `<env>.env`).
 | dumps land in `.../db/<project>/YYYY/MM/` but you want `.../db/YYYY/MM/` | use `PROJECT_BACKUP_DIR` (no project subfolder) instead of `BACKUP_DIR` |
 | timer run failed | Linux: `journalctl --user -u edd-sync@myapp:prod` · macOS: `~/Library/Logs/easy-db-dump/myapp-prod.log` |
 | macOS timer: `pg_dump not found` | the agent uses the `PATH` from when you ran `edd timer on`: fix your `PATH`, then run `edd timer on myapp prod` again |
-| macOS: "DB sync" does nothing | allow it in System Settings → Privacy & Security → Automation → DB sync → Terminal |
-| launcher missing (Linux) | log out and back in, or run `update-desktop-database ~/.local/share/applications` |
 | `edd: command not found` | add `~/.local/bin` to your `PATH` (`~/.bashrc` on Linux, `~/.zshrc` on macOS) and open a new terminal |
 
 ## Requirements
@@ -305,9 +294,9 @@ Any setting can go in any layer (`settings.env`, `project.env`, `<env>.env`).
   that ships with macOS, nothing else to install).
 - `psql`/`pg_dump`, or Docker with `PG_DOCKER_IMAGE`.
 - Optional: [`fzf`](https://github.com/junegunn/fzf) for a searchable picker (`brew install fzf` /
-  `sudo apt install fzf`); `notify-send` for notifications on Linux (macOS uses its built-in notifications).
+  `sudo apt install fzf`).
 
-Windows is not supported natively; inside WSL2 it works as on Linux (without the launcher).
+Windows is not supported natively; inside WSL2 it works as on Linux.
 
 ## Notes
 

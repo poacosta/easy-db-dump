@@ -32,17 +32,6 @@ ok()     { printf '\033[1;32m[edd]\033[0m %s\n' "$*" >&2; }
 err()    { printf '\033[1;31m[edd]\033[0m %s\n' "$*" >&2; }
 die()    { err "$*"; exit 1; }
 
-# notify <message> [critical]
-notify() {
-  local msg="$1" urgency="${2:-}"
-  if [[ "$OS" == Darwin ]]; then
-    osascript -e "display notification \"$msg\" with title \"easy-db-dump\"" >/dev/null 2>&1 || true
-  elif command -v notify-send >/dev/null; then
-    # shellcheck disable=SC2086
-    notify-send ${urgency:+-u critical} "easy-db-dump" "$msg" 2>/dev/null || true
-  fi
-}
-
 # Prints "<mtime epoch> <size bytes>" for a file (GNU vs BSD stat).
 file_stat() {
   if [[ "$OS" == Darwin ]]; then stat -f '%m %z' "$1"; else stat -c '%Y %s' "$1"; fi
@@ -61,7 +50,7 @@ A target is a project and an environment: "myapp prod" or "myapp:prod".
 Commands that take a target show a picker when it is omitted.
 
   init    <target>          Create the config file for a target and open it in your editor
-  sync    [target]          dump + restore in one step (what the launcher runs)
+  sync    [target]          dump + restore in one step (the daily routine)
   check   [target]          Verify the remote and local connections
   dump    [target]          Dump the remote database
   restore [target] [file]   Recreate the local database and restore (defaults to the latest dump)
@@ -306,12 +295,8 @@ cmd_restore() {
 
 cmd_sync() {
   resolve_target pick "$@"
-  SYNC_TARGET="$PROJECT:$ENV_NAME"
-  # Desktop notification on failure too, so a failed timer run does not go unnoticed.
-  trap 'rc=$?; if (( rc )); then notify "$SYNC_TARGET sync FAILED" critical; fi' EXIT
   cmd_dump "$PROJECT" "$ENV_NAME"
   cmd_restore "$PROJECT" "$ENV_NAME" "$LAST_DUMP"
-  notify "$SYNC_TARGET synced ✔"
 }
 
 cmd_check() {
