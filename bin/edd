@@ -63,8 +63,25 @@ load_layers() {
   done
 
   LOCAL_DB="${LOCAL_DB:-$REMOTE_DB}"
+  BACKUP_DIR="$(strip_trailing_slashes "$BACKUP_DIR")"
+  PROJECT_BACKUP_DIR="$(strip_trailing_slashes "$PROJECT_BACKUP_DIR")"
   # Dumps go to <BACKUP_DIR>/<project>/YYYY/MM/, unless the project sets its own folder.
   DUMP_DIR="${PROJECT_BACKUP_DIR:-$BACKUP_DIR/${PROJECT:-}}"
+}
+
+strip_trailing_slashes() {
+  local path="$1"
+  while [[ "$path" == */ && "$path" != / ]]; do path="${path%/}"; done
+  printf '%s' "$path"
+}
+
+# Catch common path mistakes before writing anything.
+validate_dump_dir() {
+  local var="BACKUP_DIR"; [[ -n "$PROJECT_BACKUP_DIR" ]] && var="PROJECT_BACKUP_DIR"
+  [[ "$DUMP_DIR" == /* ]] \
+    || die "$var must be an absolute path (got '$DUMP_DIR'). Use \"\$HOME/...\" or /full/path."
+  [[ "$DUMP_DIR" != "$HOME$HOME"* ]] \
+    || die "$var expands to '$DUMP_DIR' ('~' and \$HOME already mean $HOME). Did you mean '${DUMP_DIR#"$HOME"}'?"
 }
 
 list_projects() {
@@ -119,6 +136,7 @@ load_target() {
   resolve_target "$@"
   [[ -f "$(target_file)" ]] || die "$(target_file) not found. Run: edd init $PROJECT $ENV_NAME"
   load_layers
+  validate_dump_dir
 }
 
 # Run a Postgres binary, either locally or inside Docker (PG_DOCKER_IMAGE).

@@ -267,6 +267,8 @@ Any setting can go in any layer (`settings.env`, `project.env`, `<env>.env`).
 | `server version mismatch` | your `pg_dump` is older than RDS: set `PG_DOCKER_IMAGE=postgres:<rds major>` |
 | `Local FAILED` | start the project's local Postgres (e.g. `docker compose up -d db`) and check `LOCAL_*` |
 | `... not found. Run: edd init ...` | the target has no config file yet, or a typo in the project/env name (`edd targets`) |
+| `BACKUP_DIR expands to '/home/you/home/you/...'` | `~` and `$HOME` already mean your home folder: write `~/code/myapp/db`, not `~/home/you/code/myapp/db` |
+| dumps land in `.../db/<project>/YYYY/MM/` but you want `.../db/YYYY/MM/` | use `PROJECT_BACKUP_DIR` (no project subfolder) instead of `BACKUP_DIR` |
 | timer run failed | `journalctl --user -u edd-sync@myapp:prod` |
 | launcher missing from the menu | log out and back in, or run `update-desktop-database ~/.local/share/applications` |
 | `edd: command not found` | add `~/.local/bin` to your `PATH` |
