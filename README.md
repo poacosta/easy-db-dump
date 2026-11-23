@@ -5,8 +5,10 @@ Bring a Postgres database from AWS/RDS into your local Postgres with **one click
 You configure it **once** (≈5 minutes). After that, every refresh is a single click on the
 "DB sync" launcher — or zero clicks, if you enable the daily timer.
 
-```
-AWS/RDS ──pg_dump──▶ db/2026/11/prod_20261123_0952_backup.sql ──psql──▶ local Postgres
+```mermaid
+flowchart LR
+    rds[("AWS / RDS<br/>remote Postgres")] -- pg_dump --> file["db/2026/11/<br/>prod_20261123_0952_backup.sql"]
+    file -- "DROP + CREATE<br/>psql restore" --> local[("local Postgres")]
 ```
 
 Assumption: the remote databases are publicly accessible, so no VPN, bastion or tunnel is needed.
