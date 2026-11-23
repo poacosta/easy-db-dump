@@ -1,0 +1,8 @@
+[Unit]
+Description=easy-db-dump: sync %i (AWS dump -> local restore)
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/code/utils/easy-db-dump/bin/edd sync %i
+ExecStartPost=%h/code/utils/easy-db-dump/bin/edd clean

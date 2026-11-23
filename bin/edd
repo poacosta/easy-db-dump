@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# edd — easy-db-dump
+# Dump a remote Postgres database (AWS/RDS) and restore it into a local database.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+CONFIG_DIR="${EDD_CONFIG_DIR:-$ROOT/config}"
+
+# ---------- helpers ----------
+log()  { printf '\033[1;34m[edd]\033[0m %s\n' "$*" >&2; }
+ok()   { printf '\033[1;32m[edd]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[1;31m[edd]\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<EOF
+Usage: edd <command> [args]
+
+  dump    <env>          Dump the remote database -> db/YYYY/MM/<env>_YYYYMMDD_HHMM_backup.sql
+  restore <env> [file]   Restore into the local database (defaults to the latest dump of <env>)
+  sync    <env>          dump + restore in one step (the daily routine)
+  list    [env]          List existing dumps
+  clean                  Delete dumps older than RETENTION_DAYS
+  check   <env>          Verify the config: remote and local connections
+  envs                   List configured environments
+
+Config: $CONFIG_DIR/settings.env and $CONFIG_DIR/<env>.env
+EOF
+}
+
+load_settings() {
+  BACKUP_DIR="$ROOT/db"
+  RETENTION_DAYS=30
+  PG_DOCKER_IMAGE=""
+  PG_DUMP_EXTRA_ARGS="--no-owner --no-privileges"
+  RESTORE_STRICT=0
+  # shellcheck disable=SC1091
+  [[ -f "$CONFIG_DIR/settings.env" ]] && source "$CONFIG_DIR/settings.env"
+  [[ "$BACKUP_DIR" = /* ]] || BACKUP_DIR="$ROOT/$BACKUP_DIR"
+}
+
+load_env() {
+  local env="${1:-}"
+  [[ -n "$env" ]] || die "Missing environment (e.g. edd sync prod)"
+  [[ "$env" =~ ^[a-zA-Z0-9_-]+$ ]] || die "Invalid environment name: $env"
+  local file="$CONFIG_DIR/$env.env"
+  [[ -f "$file" ]] || die "$file not found (copy config/example.env)"
+
+  REMOTE_HOST="" REMOTE_PORT=5432 REMOTE_USER=postgres REMOTE_DB=""
+  REMOTE_PASSWORD="" REMOTE_PASSWORD_CMD=""
+  LOCAL_HOST=localhost LOCAL_PORT=5432 LOCAL_USER=postgres LOCAL_DB=""
+  LOCAL_PASSWORD="" ALLOW_NON_LOCAL_RESTORE=0
+  # shellcheck disable=SC1090
+  source "$file"
+  ENV_NAME="$env"
+  LOCAL_DB="${LOCAL_DB:-$REMOTE_DB}"
+}
+
+# Run a Postgres binary, either locally or inside Docker (PG_DOCKER_IMAGE).
+# Docker is useful when the RDS server is newer than your local pg_dump.
+pg() {
+  local bin="$1"; shift
+  if [[ -n "$PG_DOCKER_IMAGE" ]]; then
+    local args=(run --rm -i --network host -u "$(id -u):$(id -g)" -e PGPASSWORD)
+    local pgpass="${PGPASSFILE:-$HOME/.pgpass}"
+    [[ -f "$pgpass" ]] && args+=(-v "$pgpass:/tmp/.pgpass:ro" -e PGPASSFILE=/tmp/.pgpass)
+    docker "${args[@]}" "$PG_DOCKER_IMAGE" "$bin" "$@"
+  else
+    command -v "$bin" >/dev/null || die "'$bin' not found. Install it or set PG_DOCKER_IMAGE."
+    "$bin" "$@"
+  fi
+}
+
+# Remote password precedence: REMOTE_PASSWORD_CMD > REMOTE_PASSWORD > ~/.pgpass
+remote_password() {
+  if [[ -n "$REMOTE_PASSWORD_CMD" ]]; then
+    bash -c "$REMOTE_PASSWORD_CMD" || die "REMOTE_PASSWORD_CMD failed"
+  else
+    printf '%s' "$REMOTE_PASSWORD"
+  fi
+}
+
+latest_dump() {
+  find "$BACKUP_DIR" -type f -name "${1}_*_backup.sql" 2>/dev/null | sort | tail -n1
+}
+
+# ---------- commands ----------
+cmd_dump() {
+  load_env "$1"
+  [[ -n "$REMOTE_HOST" && -n "$REMOTE_DB" ]] || die "REMOTE_HOST and REMOTE_DB are required"
+
+  local ts year month dir out
+  ts="$(date +%Y%m%d_%H%M)"; year="$(date +%Y)"; month="$(date +%m)"
+  dir="$BACKUP_DIR/$year/$month"
+  out="$dir/${ENV_NAME}_${ts}_backup.sql"
+  mkdir -p "$dir"
+
+  log "Dumping $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB"
+  local pw; pw="$(remote_password)"
+  local start=$SECONDS
+  # Write to a .partial file and only rename on success, so a truncated dump is never restored.
+  # shellcheck disable=SC2086
+  if PGPASSWORD="$pw" pg pg_dump -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$REMOTE_USER" \
+       -d "$REMOTE_DB" -w $PG_DUMP_EXTRA_ARGS > "$out.partial"; then
+    mv "$out.partial" "$out"
+  else
+    rm -f "$out.partial"
+    die "pg_dump failed (host/port? password? pg_dump version? -> PG_DOCKER_IMAGE)"
+  fi
+  ok "Done in $((SECONDS - start))s: $out ($(du -h "$out" | cut -f1))"
+  LAST_DUMP="$out"
+}
+
+cmd_restore() {
+  load_env "$1"
+  local file="${2:-}"
+  [[ -n "$file" ]] || file="$(latest_dump "$ENV_NAME")"
+  [[ -n "$file" && -f "$file" ]] || die "No dump to restore (run: edd dump $ENV_NAME)"
+  [[ -n "$LOCAL_DB" ]] || die "LOCAL_DB is empty"
+
+  # Safety guard: the target database gets dropped, so only allow local hosts by default.
+  case "$LOCAL_HOST" in
+    localhost|127.0.0.1|::1) ;;
+    *) [[ "$ALLOW_NON_LOCAL_RESTORE" == 1 ]] \
+         || die "LOCAL_HOST=$LOCAL_HOST is not local. Refusing to restore (set ALLOW_NON_LOCAL_RESTORE=1 to override)." ;;
+  esac
+
+  export PGPASSWORD="$LOCAL_PASSWORD"
+  local conn=(-h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$LOCAL_USER" -w)
+
+  log "Recreating local database '$LOCAL_DB' on $LOCAL_HOST:$LOCAL_PORT"
+  pg psql "${conn[@]}" -d postgres -q -v ON_ERROR_STOP=1 -c "SET client_min_messages = warning;" \
+    -c "DROP DATABASE IF EXISTS \"$LOCAL_DB\" WITH (FORCE);" \
+    -c "CREATE DATABASE \"$LOCAL_DB\";" \
+    || die "Could not recreate the local database (is local Postgres running?)"
+
+  log "Restoring $(basename "$file")"
+  local strict=(); [[ "$RESTORE_STRICT" == 1 ]] && strict=(-v ON_ERROR_STOP=1)
+  local start=$SECONDS
+  pg psql "${conn[@]}" -d "$LOCAL_DB" -q "${strict[@]}" < "$file" >/dev/null
+  ok "Restore finished in $((SECONDS - start))s -> $LOCAL_DB"
+}
+
+cmd_check() {
+  load_env "$1"
+  local failed=0
+  log "Config file: $CONFIG_DIR/$ENV_NAME.env"
+  log "Backup dir:  $BACKUP_DIR"
+
+  local pw; pw="$(remote_password)"
+  if PGPASSWORD="$pw" pg psql -h "$REMOTE_HOST" -p "$REMOTE_PORT" -U "$REMOTE_USER" -d "$REMOTE_DB" -w \
+       -tAc "select current_setting('server_version')" >/dev/null 2>&1; then
+    ok "Remote OK: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB"
+  else
+    printf '\033[1;31m[edd]\033[0m %s\n' "Remote FAILED: $REMOTE_USER@$REMOTE_HOST:$REMOTE_PORT/$REMOTE_DB (host/port? password?)" >&2
+    failed=1
+  fi
+
+  if PGPASSWORD="$LOCAL_PASSWORD" pg psql -h "$LOCAL_HOST" -p "$LOCAL_PORT" -U "$LOCAL_USER" -d postgres -w \
+       -tAc "select 1" >/dev/null 2>&1; then
+    ok "Local OK:  $LOCAL_USER@$LOCAL_HOST:$LOCAL_PORT (target database: $LOCAL_DB)"
+  else
+    printf '\033[1;31m[edd]\033[0m %s\n' "Local FAILED: $LOCAL_USER@$LOCAL_HOST:$LOCAL_PORT (is local Postgres running?)" >&2
+    failed=1
+  fi
+
+  [[ $failed == 0 ]] && ok "All good. 'edd sync $ENV_NAME' is ready." || exit 1
+}
+
+cmd_sync() {
+  cmd_dump "$1"
+  cmd_restore "$1" "$LAST_DUMP"
+  command -v notify-send >/dev/null && notify-send "easy-db-dump" "$1 synced ✔" || true
+}
+
+cmd_list() {
+  local pattern="${1:-*}"
+  find "$BACKUP_DIR" -type f -name "${pattern}_*_backup.sql" -printf '%TY-%Tm-%Td %TH:%TM  %10s  %p\n' 2>/dev/null \
+    | sort | awk '{ printf "%s %s  %8.1f MB  %s\n", $1, $2, $3/1048576, $4 }'
+}
+
+cmd_clean() {
+  log "Deleting dumps older than $RETENTION_DAYS days in $BACKUP_DIR"
+  find "$BACKUP_DIR" -type f -name '*_backup.sql' -mtime +"$RETENTION_DAYS" -print -delete 2>/dev/null || true
+  find "$BACKUP_DIR" -mindepth 1 -type d -empty -delete 2>/dev/null || true
+}
+
+cmd_envs() {
+  find "$CONFIG_DIR" -maxdepth 1 -name '*.env' ! -name settings.env ! -name example.env -printf '%f\n' \
+    | sed 's/\.env$//' | sort
+}
+
+main() {
+  load_settings
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    dump)    cmd_dump "$@" ;;
+    restore) cmd_restore "$@" ;;
+    sync)    cmd_sync "$@" ;;
+    list)    cmd_list "$@" ;;
+    clean)   cmd_clean ;;
+    check)   cmd_check "$@" ;;
+    envs)    cmd_envs ;;
+    ""|-h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"

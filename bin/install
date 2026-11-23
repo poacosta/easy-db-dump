@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Installs: `edd` symlink in ~/.local/bin, a desktop launcher and (optionally) a daily timer.
+# Usage: bin/install [env-for-timer]     e.g. bin/install prod
+set -euo pipefail
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV="${1:-}"
+
+chmod +x "$ROOT/bin/edd"
+mkdir -p "$HOME/.local/bin"
+ln -sf "$ROOT/bin/edd" "$HOME/.local/bin/edd"
+echo "✔ edd -> ~/.local/bin/edd"
+
+[[ -f "$ROOT/config/settings.env" ]] || cp "$ROOT/config/settings.env.example" "$ROOT/config/settings.env"
+
+if [[ -n "$ENV" ]]; then
+  [[ -f "$ROOT/config/$ENV.env" ]] || { cp "$ROOT/config/example.env" "$ROOT/config/$ENV.env"; echo "✎ Edit config/$ENV.env"; }
+
+  # Desktop launcher (one click)
+  apps="$HOME/.local/share/applications"; mkdir -p "$apps"
+  cat > "$apps/edd-sync-$ENV.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=DB sync ($ENV)
+Comment=Dump $ENV from AWS and restore it locally
+Exec=bash -c '"$ROOT/bin/edd" sync $ENV; echo; read -n1 -rsp "Press any key to close..."'
+Terminal=true
+Icon=network-server-database
+Categories=Development;
+EOF
+  echo "✔ 'DB sync ($ENV)' launcher added to the applications menu"
+
+  # Daily timer (systemd --user)
+  units="$HOME/.config/systemd/user"; mkdir -p "$units"
+  sed "s|%h/code/utils/easy-db-dump|$ROOT|g" "$ROOT/systemd/edd-sync@.service" > "$units/edd-sync@.service"
+  cp "$ROOT/systemd/edd-sync@.timer" "$units/"
+  systemctl --user daemon-reload
+  systemctl --user enable --now "edd-sync@$ENV.timer"
+  echo "✔ Daily timer enabled: systemctl --user list-timers | grep edd"
+fi

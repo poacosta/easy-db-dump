@@ -1,0 +1,10 @@
+[Unit]
+Description=easy-db-dump: daily sync of %i
+
+[Timer]
+# Monday to Friday at 08:30; if the machine was off, run on next boot
+OnCalendar=Mon..Fri 08:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
