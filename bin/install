@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
-# One-time installation, valid for every project:
+# One-time installation (Linux and macOS), valid for every project:
 #   - `edd` symlink in ~/.local/bin
 #   - global config folder ~/.edd
-#   - a single "DB sync" desktop launcher (shows a picker with all your targets)
-#   - systemd user units for the optional daily sync (enabled per target with `edd timer on`)
+#   - a single "DB sync" launcher that shows a picker with all your targets:
+#       Linux: applications menu entry  ·  macOS: ~/Applications/DB sync.app (Spotlight, Launchpad)
+#   - Linux only: systemd user units for the optional daily sync (macOS uses launchd,
+#     configured per target by `edd timer on`)
 # Safe to run again, e.g. after moving the repo.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONFIG_DIR="${EDD_CONFIG_DIR:-$HOME/.edd}"
+OS="$(uname -s)"
 
-chmod +x "$ROOT/bin/edd"
+chmod +x "$ROOT/bin/edd" "$ROOT/bin/edd-launch"
 mkdir -p "$HOME/.local/bin"
 ln -sf "$ROOT/bin/edd" "$HOME/.local/bin/edd"
 echo "✔ edd -> ~/.local/bin/edd"
@@ -18,25 +21,52 @@ mkdir -p "$CONFIG_DIR/projects"
 [[ -f "$CONFIG_DIR/settings.env" ]] || cp "$ROOT/templates/settings.env" "$CONFIG_DIR/settings.env"
 echo "✔ Config folder: $CONFIG_DIR"
 
-apps="$HOME/.local/share/applications"; mkdir -p "$apps"
-cat > "$apps/edd-sync.desktop" <<EOF
+case "$OS" in
+  Linux)
+    apps="$HOME/.local/share/applications"; mkdir -p "$apps"
+    cat > "$apps/edd-sync.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=DB sync
 Comment=Dump a database from AWS and restore it locally
-Exec=bash -c '"$ROOT/bin/edd" sync; echo; read -n1 -rsp "Press any key to close..."'
+Exec="$ROOT/bin/edd-launch"
 Terminal=true
 Icon=network-server-database
 Categories=Development;
 EOF
-echo "✔ 'DB sync' launcher added to the applications menu"
+    echo "✔ 'DB sync' launcher added to the applications menu"
 
-if command -v systemctl >/dev/null; then
-  units="$HOME/.config/systemd/user"; mkdir -p "$units"
-  cp "$ROOT/systemd/edd-sync@.service" "$ROOT/systemd/edd-sync@.timer" "$units/"
-  systemctl --user daemon-reload
-  echo "✔ systemd units installed (enable per target with: edd timer on <project> <env>)"
-fi
+    if command -v systemctl >/dev/null; then
+      units="$HOME/.config/systemd/user"; mkdir -p "$units"
+      cp "$ROOT/systemd/edd-sync@.service" "$ROOT/systemd/edd-sync@.timer" "$units/"
+      systemctl --user daemon-reload
+      echo "✔ systemd units installed (enable per target with: edd timer on <project> <env>)"
+    fi
+    ;;
+  Darwin)
+    app="$HOME/Applications/DB sync.app"
+    mkdir -p "$HOME/Applications"
+    rm -rf "$app"
+    # A tiny AppleScript app that opens Terminal and runs the launcher script.
+    osacompile -o "$app" \
+      -e 'tell application "Terminal"' \
+      -e 'activate' \
+      -e "do script \"'$ROOT/bin/edd-launch'; exit\"" \
+      -e 'end tell'
+    echo "✔ 'DB sync' app created in ~/Applications (find it with Spotlight or drag it to the Dock)"
+    ;;
+  *)
+    echo "! Unsupported OS '$OS': the edd command works, but no launcher was created" ;;
+esac
+
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *)
+    profile="$HOME/.bashrc"; [[ "$OS" == Darwin ]] && profile="$HOME/.zshrc"
+    echo
+    echo "! ~/.local/bin is not in your PATH. Add this line to $profile and open a new terminal:"
+    echo '    export PATH="$HOME/.local/bin:$PATH"' ;;
+esac
 
 echo
 echo "Next: edd init <project> <env>     e.g. edd init myapp prod"
