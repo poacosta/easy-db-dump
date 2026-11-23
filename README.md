@@ -38,7 +38,7 @@ Assumption: the remote databases are publicly accessible, so no VPN, bastion or 
 
 - **Project**: an application you work on (`myapp`, `shop`…).
 - **Environment**: one of its remote databases (`prod`, `staging`…).
-- **Target** = project + environment, written `myapp prod` or `myapp:prod`. Every command works on a target.
+- **Target** = project + environment, written `myapp prod` or `myapp:prod`. Most commands work on a target.
 
 You clone this repo **once**, no matter how many projects you have. Projects are just config files.
 
@@ -52,7 +52,7 @@ Code, config and dumps are kept apart:
 | **The command** | `~/.local/bin/edd` | symlink to the script, created by `bin/install` |
 | **Config** | `~/.edd/` | one folder per project, one file per environment |
 | **Dumps** | `~/db-dumps/<project>/YYYY/MM/` | root configurable; a project can use its own folder |
-| **Daily timer** | Linux: `~/.config/systemd/user/edd-sync@.{service,timer}`<br/>macOS: `~/Library/LaunchAgents/dev.easy-db-dump.sync.<project>.<env>.plist` | per target, created by `edd timer on` |
+| **Daily timer** | Linux: `~/.config/systemd/user/edd-sync@.{service,timer}` (from `bin/install`) + per-target drop-ins `edd-sync@<project>:<env>.{service,timer}.d/`<br/>macOS: `~/Library/LaunchAgents/dev.easy-db-dump.sync.<project>.<env>.plist` | per target, created by `edd timer on`, removed by `edd timer off` |
 
 ```
 ~/code/utils/easy-db-dump/              <- this repo (code only, no config, no dumps)
@@ -84,7 +84,8 @@ Code, config and dumps are kept apart:
 ```
 
 To keep the config somewhere else, export `EDD_CONFIG_DIR` in your shell profile
-(e.g. `export EDD_CONFIG_DIR="$HOME/Dropbox/edd"`) before running `bin/install`.
+(e.g. `export EDD_CONFIG_DIR="$HOME/Dropbox/edd"`) before running `bin/install`. Daily timers
+remember the folder that was active when you ran `edd timer on`.
 
 **The repo folder is the installation**: don't move or delete it (if you move it, run
 `bin/install` again from the new location).
@@ -139,8 +140,21 @@ This creates the `edd` command (in `~/.local/bin`; the installer tells you if th
 missing from your `PATH`) and the `~/.edd/` folder with `settings.env`. On Linux it also installs
 the systemd units for the optional daily sync.
 
-**3. Review the global settings** in `~/.edd/settings.env`: where dumps go (`BACKUP_DIR`,
-default `~/db-dumps`) and your usual local Postgres credentials, so you don't repeat them per project.
+**3. Set the global settings** in `~/.edd/settings.env`:
+
+- **Local Postgres credentials** — uncomment and adjust them. They are commented out by default and
+  `LOCAL_PASSWORD` is empty, which most setups (e.g. the official Docker image) reject:
+  ```bash
+  LOCAL_HOST=localhost
+  LOCAL_PORT=5432
+  LOCAL_USER=postgres
+  LOCAL_PASSWORD=postgres
+  ```
+  Set them here once; a project with its own local Postgres (e.g. another docker compose port)
+  overrides them in its `project.env`.
+- **Where dumps go** — `BACKUP_DIR`, default `~/db-dumps`.
+
+Everything else has sensible defaults (see [Settings reference](#settings-reference)).
 
 ### Once per target (project + environment)
 
@@ -151,7 +165,8 @@ edd init myapp prod
 ```
 
 This creates `~/.edd/projects/myapp/prod.env` (and `project.env` the first time for that
-project) and opens it in your editor. Fill in:
+project) and opens it in your editor (`$VISUAL`, `$EDITOR`, or else `nano`/`vi`). The file is
+commented; fill in at least:
 
 ```bash
 REMOTE_HOST=myapp.xxxxxxxx.us-east-1.rds.amazonaws.com
@@ -199,17 +214,27 @@ edd check myapp prod
 edd timer on myapp prod
 ```
 
-It runs Monday to Friday at 08:30, then deletes old dumps. Output goes to the logs below.
+By default it runs Monday to Friday at 08:30, then deletes old dumps (`edd clean`). Output goes
+to the logs below. To change the schedule, set these in any config layer and run `edd timer on`
+again:
+
+```bash
+TIMER_TIME="07:45"      # HH:MM, 24h
+TIMER_DAYS="daily"      # weekdays (default) | daily
+```
+
+`edd timer list` shows what is scheduled; `edd timer off myapp prod` removes it.
 
 | | Scheduler | If the machine was off or asleep at 08:30 | Logs |
 |---|---|---|---|
-| Linux | systemd user timer (random delay up to 10 min, so several targets don't dump at once) | runs on the next boot | `journalctl --user -u edd-sync@myapp:prod` |
+| Linux | systemd user timer (random delay up to 10 min, so several targets don't dump at once). Runs while you are logged in; for it to run without a session, enable lingering once: `loginctl enable-linger` | runs on the next boot | `journalctl --user -u edd-sync@myapp:prod` |
 | macOS | launchd agent | runs when the Mac wakes up (skipped if it was shut down) | `~/Library/Logs/easy-db-dump/myapp-prod.log` |
 
-On macOS, `edd timer on` saves your current `PATH` into the agent so it finds `pg_dump` and
-`docker`; if you change where they are installed, run `edd timer on` again.
+`edd timer on` saves your current `PATH` and `EDD_CONFIG_DIR` into the timer (neither systemd nor
+launchd read your shell profile), so it finds `pg_dump`, `docker` and your config. If any of those
+change, run `edd timer on` again.
 
-Repeat steps 4–7 for each new project or environment. Steps 1–3 are never repeated.
+Repeat steps 4–7 for each new project or environment. Steps 0–3 are never repeated.
 
 ---
 
@@ -244,7 +269,8 @@ installed you get a searchable list instead (handy with 20 projects).
 | `edd list [project]` | list dumps with their full path |
 | `edd clean` | delete dumps older than `RETENTION_DAYS`, per project |
 | `edd timer list` | show scheduled daily syncs |
-| `edd timer on\|off <project> <env>` | enable/disable the daily sync of a target |
+| `edd timer on\|off <project> <env>` | enable/disable the daily sync of a target (re-run `on` to apply schedule changes) |
+| `edd help` | show usage |
 
 A target can be written `myapp prod` or `myapp:prod`. Omit it to get the picker.
 
@@ -260,11 +286,16 @@ Any setting can go in any layer (`settings.env`, `project.env`, `<env>.env`).
 | `LOCAL_DB` | `REMOTE_DB` | local database (dropped and recreated on every restore) |
 | `BACKUP_DIR` | `~/db-dumps` | dumps go to `<BACKUP_DIR>/<project>/YYYY/MM/` |
 | `PROJECT_BACKUP_DIR` | empty | use this folder for the project instead (`YYYY/MM/` created inside) |
-| `RETENTION_DAYS` | `30` | `edd clean` deletes older dumps |
+| `RETENTION_DAYS` | `30` | `edd clean` deletes older dumps. The daily timer runs it after each sync; a manual `edd sync` does not, so run `edd clean` yourself if you don't use the timer |
+| `TIMER_TIME` | `08:30` | daily sync time (HH:MM, 24h), applied by `edd timer on` |
+| `TIMER_DAYS` | `weekdays` | `weekdays` (Monday to Friday) or `daily`, applied by `edd timer on` |
 | `PG_DOCKER_IMAGE` | empty | run `pg_dump`/`psql` from Docker, e.g. `postgres:16` (on macOS, `localhost` is mapped to `host.docker.internal` automatically) |
 | `PG_DUMP_EXTRA_ARGS` | `--no-owner --no-privileges` | extra `pg_dump` flags, e.g. `--exclude-table-data=audit_logs` |
 | `RESTORE_STRICT` | `0` | `1` = abort the restore on the first SQL error |
 | `ALLOW_NON_LOCAL_RESTORE` | `0` | `1` = allow restoring into a non-localhost server |
+
+The config folder itself is set with the environment variable `EDD_CONFIG_DIR` (default `~/.edd`),
+not in a config file.
 
 ## How it differs from running the commands by hand
 
@@ -285,7 +316,9 @@ Any setting can go in any layer (`settings.env`, `project.env`, `<env>.env`).
 | `BACKUP_DIR expands to '/home/you/home/you/...'` | `~` and `$HOME` already mean your home folder: write `~/code/myapp/db`, not `~/home/you/code/myapp/db` |
 | dumps land in `.../db/<project>/YYYY/MM/` but you want `.../db/YYYY/MM/` | use `PROJECT_BACKUP_DIR` (no project subfolder) instead of `BACKUP_DIR` |
 | timer run failed | Linux: `journalctl --user -u edd-sync@myapp:prod` · macOS: `~/Library/Logs/easy-db-dump/myapp-prod.log` |
-| macOS timer: `pg_dump not found` | the agent uses the `PATH` from when you ran `edd timer on`: fix your `PATH`, then run `edd timer on myapp prod` again |
+| timer: `pg_dump not found` | the timer uses the `PATH` from when you ran `edd timer on`: fix your `PATH`, then run `edd timer on myapp prod` again |
+| new `TIMER_TIME`/`TIMER_DAYS` not applied | run `edd timer on myapp prod` again |
+| Linux timer doesn't run while logged out | `loginctl enable-linger` |
 | `edd: command not found` | add `~/.local/bin` to your `PATH` (`~/.bashrc` on Linux, `~/.zshrc` on macOS) and open a new terminal |
 
 ## Requirements
@@ -298,6 +331,31 @@ Any setting can go in any layer (`settings.env`, `project.env`, `<env>.env`).
 
 Windows is not supported natively; inside WSL2 it works as on Linux.
 
+## Updating
+
+```bash
+cd ~/code/utils/easy-db-dump && git pull && bin/install
+```
+
+Your config in `~/.edd` and your dumps are not touched. Re-running `bin/install` refreshes the
+systemd units; existing timers keep working.
+
+## Uninstalling
+
+```bash
+edd timer list                        # then, for each target:
+edd timer off myapp prod
+rm ~/.local/bin/edd
+rm ~/.config/systemd/user/edd-sync@.service ~/.config/systemd/user/edd-sync@.timer   # Linux
+rm -rf ~/code/utils/easy-db-dump      # the repo
+rm -rf ~/.edd                         # your config (optional)
+rm -rf ~/db-dumps                     # your dumps (optional; also any PROJECT_BACKUP_DIR folders)
+```
+
 ## Notes
 
 - File names have minute precision (`HHMM`), so two dumps of the same target within the same minute overwrite each other.
+
+## License
+
+[MIT](LICENSE)

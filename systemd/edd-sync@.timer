@@ -2,7 +2,9 @@
 Description=easy-db-dump: daily sync of %i
 
 [Timer]
-# Monday to Friday at 08:30; if the machine was off, run on next boot.
+# Default schedule. `edd timer on` overrides OnCalendar per target with a drop-in
+# (edd-sync@<project>:<env>.timer.d/schedule.conf) built from TIMER_TIME / TIMER_DAYS.
+# Persistent: if the machine was off, run on next boot.
 # The random delay spreads out several targets so they don't all dump at once.
 OnCalendar=Mon..Fri 08:30
 RandomizedDelaySec=10min

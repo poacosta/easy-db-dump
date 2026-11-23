@@ -73,6 +73,8 @@ load_layers() {
   PG_DOCKER_IMAGE=""
   PG_DUMP_EXTRA_ARGS="--no-owner --no-privileges"
   RESTORE_STRICT=0
+  TIMER_TIME="08:30"
+  TIMER_DAYS="weekdays"
   REMOTE_HOST="" REMOTE_PORT=5432 REMOTE_USER=postgres REMOTE_DB=""
   REMOTE_PASSWORD="" REMOTE_PASSWORD_CMD=""
   LOCAL_HOST=localhost LOCAL_PORT=5432 LOCAL_USER=postgres LOCAL_DB=""
@@ -373,14 +375,31 @@ cmd_clean() {
 }
 
 # ---------- daily timer: systemd (Linux) / launchd (macOS) ----------
+# Schedule comes from TIMER_TIME (HH:MM) and TIMER_DAYS (weekdays | daily), read from
+# the config layers when `edd timer on` runs. The current PATH and EDD_CONFIG_DIR are
+# saved too, because neither systemd nor launchd read your shell profile.
+
+validate_timer_settings() {
+  [[ "$TIMER_TIME" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] \
+    || die "TIMER_TIME must be HH:MM in 24h format (got '$TIMER_TIME')"
+  case "$TIMER_DAYS" in
+    weekdays|daily) ;;
+    *) die "TIMER_DAYS must be 'weekdays' or 'daily' (got '$TIMER_DAYS')" ;;
+  esac
+}
+
+timer_description() {
+  if [[ "$TIMER_DAYS" == daily ]]; then printf 'every day at %s' "$TIMER_TIME"
+  else printf 'Monday to Friday at %s' "$TIMER_TIME"; fi
+}
+
 launchd_label() { printf 'dev.easy-db-dump.sync.%s.%s' "$PROJECT" "$ENV_NAME"; }
 launchd_plist() { printf '%s/Library/LaunchAgents/%s.plist' "$HOME" "$(launchd_label)"; }
 
-# Writes a LaunchAgent that runs Monday to Friday at 08:30. launchd runs a missed
-# job when the Mac wakes up. PATH is captured now because launchd's default PATH
-# does not include Homebrew (pg_dump, docker).
+# launchd runs a missed job when the Mac wakes up (not if it was shut down).
 write_launchd_plist() {
   local log_dir="$HOME/Library/Logs/easy-db-dump" day
+  local hour=$((10#${TIMER_TIME%%:*})) minute=$((10#${TIMER_TIME#*:}))
   mkdir -p "$(dirname "$(launchd_plist)")" "$log_dir"
   {
     cat <<EOF
@@ -406,9 +425,13 @@ write_launchd_plist() {
   <key>StartCalendarInterval</key>
   <array>
 EOF
-    for day in 1 2 3 4 5; do
-      printf '    <dict><key>Weekday</key><integer>%s</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>30</integer></dict>\n' "$day"
-    done
+    if [[ "$TIMER_DAYS" == daily ]]; then
+      printf '    <dict><key>Hour</key><integer>%s</integer><key>Minute</key><integer>%s</integer></dict>\n' "$hour" "$minute"
+    else
+      for day in 1 2 3 4 5; do
+        printf '    <dict><key>Weekday</key><integer>%s</integer><key>Hour</key><integer>%s</integer><key>Minute</key><integer>%s</integer></dict>\n' "$day" "$hour" "$minute"
+      done
+    fi
     cat <<EOF
   </array>
   <key>StandardOutPath</key>
@@ -419,6 +442,25 @@ EOF
 </plist>
 EOF
   } > "$(launchd_plist)"
+}
+
+systemd_dropin_dir() { printf '%s/.config/systemd/user/edd-sync@%s:%s.%s.d' "$HOME" "$PROJECT" "$ENV_NAME" "$1"; }
+
+# Per-target drop-ins on top of the generic edd-sync@ units installed by bin/install.
+write_systemd_dropins() {
+  local calendar="Mon..Fri $TIMER_TIME:00"
+  [[ "$TIMER_DAYS" == daily ]] && calendar="*-*-* $TIMER_TIME:00"
+  mkdir -p "$(systemd_dropin_dir service)" "$(systemd_dropin_dir timer)"
+  cat > "$(systemd_dropin_dir service)/edd.conf" <<EOF
+[Service]
+Environment="EDD_CONFIG_DIR=$CONFIG_DIR"
+Environment="PATH=$PATH"
+EOF
+  cat > "$(systemd_dropin_dir timer)/schedule.conf" <<EOF
+[Timer]
+OnCalendar=
+OnCalendar=$calendar
+EOF
 }
 
 cmd_timer() {
@@ -437,8 +479,12 @@ cmd_timer() {
         systemctl --user list-timers --all 'edd-sync@*'
       fi ;;
     on|off)
-      resolve_target nopick "$@"
-      [[ -f "$(target_file)" ]] || die "$(target_file) not found. Run: edd init $PROJECT $ENV_NAME"
+      if [[ "$action" == on ]]; then
+        load_target nopick "$@"
+        validate_timer_settings
+      else
+        resolve_target nopick "$@"   # no config needed to turn a timer off
+      fi
       local target="$PROJECT:$ENV_NAME"
       if [[ "$OS" == Darwin ]]; then
         local domain; domain="gui/$(id -u)"
@@ -446,7 +492,7 @@ cmd_timer() {
         if [[ "$action" == on ]]; then
           write_launchd_plist
           launchctl bootstrap "$domain" "$(launchd_plist)"
-          ok "Daily sync enabled for $target (logs: ~/Library/Logs/easy-db-dump/$PROJECT-$ENV_NAME.log)"
+          ok "Daily sync enabled for $target, $(timer_description) (logs: ~/Library/Logs/easy-db-dump/$PROJECT-$ENV_NAME.log)"
         else
           rm -f "$(launchd_plist)"
           ok "Daily sync disabled for $target"
@@ -454,10 +500,15 @@ cmd_timer() {
       else
         local unit="edd-sync@$target.timer"
         if [[ "$action" == on ]]; then
-          systemctl --user enable --now "$unit"
-          ok "Daily sync enabled for $target (logs: journalctl --user -u edd-sync@$target)"
+          write_systemd_dropins
+          systemctl --user daemon-reload
+          systemctl --user enable "$unit"
+          systemctl --user restart "$unit"   # picks up a changed schedule if it was already on
+          ok "Daily sync enabled for $target, $(timer_description) (logs: journalctl --user -u edd-sync@$target)"
         else
-          systemctl --user disable --now "$unit"
+          systemctl --user disable --now "$unit" 2>/dev/null || true
+          rm -rf "$(systemd_dropin_dir service)" "$(systemd_dropin_dir timer)"
+          systemctl --user daemon-reload
           ok "Daily sync disabled for $target"
         fi
       fi ;;
