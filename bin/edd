@@ -5,7 +5,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-CONFIG_DIR="${EDD_CONFIG_DIR:-$HOME/edd}"
+CONFIG_DIR="${EDD_CONFIG_DIR:-$HOME/.edd}"
 PROJECTS_DIR="$CONFIG_DIR/projects"
 TEMPLATES_DIR="$ROOT/templates"
 NAME_RE='^[a-zA-Z0-9_-]+$'

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # One-time installation, valid for every project:
 #   - `edd` symlink in ~/.local/bin
-#   - global config folder ~/edd
+#   - global config folder ~/.edd
 #   - a single "DB sync" desktop launcher (shows a picker with all your targets)
 #   - systemd user units for the optional daily sync (enabled per target with `edd timer on`)
 # Safe to run again, e.g. after moving the repo.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_DIR="${EDD_CONFIG_DIR:-$HOME/edd}"
+CONFIG_DIR="${EDD_CONFIG_DIR:-$HOME/.edd}"
 
 chmod +x "$ROOT/bin/edd"
 mkdir -p "$HOME/.local/bin"
